@@ -2,7 +2,7 @@ import datasets
 from pathlib import Path
 from collections import Counter
 from tqdm import tqdm, trange
-import semiolog as slg
+import util
 
 datasets.config.HF_DATASETS_CACHE = Path("/cluster/scratch/gjuan/.cache/huggingface/datasets")
 
@@ -32,4 +32,4 @@ for example in tqdm(wiki_train):
 
 numerals = {num : freq for num, freq in numerals.most_common()}
 
-slg.util.save_file(numerals, f"ngrams/numerals.json")
+util.save_file(numerals, f"ngrams/numerals.json")

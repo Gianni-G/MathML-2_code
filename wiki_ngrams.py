@@ -2,7 +2,7 @@ import datasets
 from pathlib import Path
 from collections import Counter
 from tqdm import tqdm, trange
-import semiolog as slg
+import util
 
 datasets.config.HF_DATASETS_CACHE = Path("/cluster/scratch/gjuan/.cache/huggingface/datasets")
 
@@ -21,4 +21,4 @@ for example in tqdm(wiki_train):
 
 ngrams = {"".join(tup) : freq for tup, freq in ngrams.most_common() if freq>=thres}
 
-slg.util.save_file(ngrams, f"ngrams/{ng_n}_{thres}.json")
+util.save_file(ngrams, f"ngrams/{ng_n}_{thres}.json")
