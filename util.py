@@ -3,142 +3,130 @@
 
 # Load Modules
 
-import os, sys
-import math
-import concurrent.futures
-from joblib import Parallel, delayed
-import csv
+import os
 import json
-import itertools
 import functools
-import ast
-from collections import Counter
 import numpy as np
 from scipy.sparse import csr_matrix
 import time
-import pandas as pd
 import matplotlib.pyplot as plt
-import plotly.graph_objects as go
+import seaborn as sns
+import concurrent.futures
 
-import socket
-socket_name = socket.gethostname()
-if any(name in socket_name for name in {"Gianni","vpn"}):
-    from tqdm.notebook import tqdm, trange
-else:
-    from tqdm.auto import tqdm, trange
+sns.set(
+    rc = {'figure.figsize':(25,20)},
+    font="Courier"
+    )
 
-# Definitions of Functions
+def plot(vector,
+    xticklabels = None,
+    yticklabels = None,
+    vmin = None,
+    vmax = None,
+    labelbottom = False,
+    labelright = False,
+    save = None,
 
-def chunk_size(total_n, chunks_n):
-    return math.ceil(total_n / chunks_n)
-
-def partition(lst, n_of_parts):
-    """Partitions list in n parts."""
-    if not isinstance(lst,list):
-        lst = list(lst)
-    chunk_size = math.ceil(len(lst) / n_of_parts)
-    for i in range(0, len(lst), chunk_size):
-        yield lst[i : i + chunk_size]
-
-# head and chunks taken from https://stackoverflow.com/questions/24527006/split-a-generator-into-chunks-without-pre-walking-it
-
-def head(iterable, max=10):
-    first = next(iterable)      # raise exception when depleted
-    def head_inner():
-        yield first             # yield the extracted first element
-        for cnt, el in enumerate(iterable):
-            yield el
-            if cnt + 1 >= max:  # cnt + 1 to include first
-                break
-    return head_inner()
-
-def chunks(iterable, size=10):
-    iterator = iter(iterable)
-    for first in iterator:
-        yield itertools.chain([first], itertools.islice(iterator, size - 1))
-        
-def multiprocessing(func, args, cores=None):
-    if cores == None:
-        cores = os.cpu_count()
-
-    result = Parallel(n_jobs=cores)(delayed(func)(i) for i in args)
-    return result
+    ):
+    hm = sns.heatmap(
+        vector,
+        xticklabels=xticklabels,
+        yticklabels=yticklabels,
+        linewidths=.5,
+        cmap="coolwarm",#"YlGnBu",
+        center = 0,
+        vmin = vmin,
+        vmax = vmax,
+        square=True,
+        ).tick_params(
+            axis='both',
+            which='major',
+            labelsize=11,
+            labelbottom = labelbottom,
+            labelright = labelright, 
+            bottom=False, 
+            top = False, 
+            labeltop=True)
     
-    # with concurrent.futures.ProcessPoolExecutor(cores) as executor:
-    #     result = executor.map(func, args, chunksize=chunksize)
-    # return list(result)
+    plt.yticks(rotation=0) 
+    if save != None:
+        plt.savefig(save)
+    return hm
+
+def pmi_matrix(
+    terms,
+    contexts,
+    ng1,
+    ng2,
+    ng3,
+    total,
+    context_side = "right",
+    independent = False, # Two possibilities: False: empirical prob of t | True: p(t left)*p(t right)
+    inf_value = -1,
+    ):
+    
+    matrix = []
+    for i in terms:
+        if len(i)==1:
+            nt = ng1.get(i,0)
+            Pt = nt/total
+        elif len(i)==2:
+            if independent:
+                ntl = ng1.get(i[0],0)
+                ntr = ng1.get(i[1],0)
+                Pt = (ntl/total)*(ntr/total)
+            else:
+                nt = ng2.get(i,0)
+                Pt = nt/total
+
+        row = []
+        for j in contexts:
+            nc = ng1.get(j,0)
+            Pc = nc/total
+
+            tc = i+j if context_side == "right" else j+i
+            if len(i)==1:
+                ntc = ng2.get(tc,0)
+            elif len(i)==2:
+                ntc = ng3.get(tc,0)
+            
+            Ptc = ntc/total
+            if Ptc == 0:
+                # the value of pmi when Ptc = 0 should be reconsidered (the best would probably be to use min of the matrix or have a variable measure depending on the prob of the term and context)
+                pmi = inf_value
+            else:
+                pmi = np.log(Ptc/(Pt*Pc))/-np.log(Ptc)
+
+            row.append(pmi)
+        
+        matrix.append(row)
+
+    matrix = np.array(matrix)
+    return matrix
+
+def llf(R, elements, id):
+    n = len(elements)
+    if id < n:
+        return elements[id]
+    else:
+        label = [id]
+        while max(label)>=n:
+            new_label = []
+            for l in label:
+                if l<n:
+                    new_label.append(l)
+                else:
+                    new_label.append(int(R[l-n,0]))
+                    new_label.append(int(R[l-n,1]))
+            label = new_label
+        label = "{ " + " ".join([elements[l] for l in label]) + " }"
+
+        return label
 
 def multithreading(func, args, chunksize=1,cores=None):
     with concurrent.futures.ThreadPoolExecutor(cores) as executor:
         result = executor.map(func, args, chunksize=chunksize)
     return list(result)
-
-
-# Adapted Dans Shiebler: from http://danshiebler.com/2016-09-14-parallel-progress-bar/
-
-def multiprocessing_tqdm(function, array, cores=None, desc = None):
-    """
-        A parallel version of the map function with a progress bar. 
-
-        Args:
-            array (array-like): An array to iterate over.
-            function (function): A python function to apply to the elements of array
-            n_jobs (int, default=16): The number of cores to use
-            use_kwargs (boolean, default=False): Whether to consider the elements of array as dictionaries of 
-                keyword arguments to function 
-            front_num (int, default=3): The number of iterations to run serially before kicking off the parallel job. 
-                Useful for catching bugs
-        Returns:
-            [function(array[0]), function(array[1]), ...]
-    """
-    #We run the first few iterations serially to catch bugs
-    # if front_num > 0:
-    #     front = [function(**a) if use_kwargs else function(a) for a in array[:front_num]]
-    # #If we set n_jobs to 1, just run a list comprehension. This is useful for benchmarking and debugging.
-    # if n_jobs==1:
-    #     return front + [function(**a) if use_kwargs else function(a) for a in tqdm(array[front_num:])]
-    #Assemble the workers
-    with concurrent.futures.ProcessPoolExecutor(max_workers=cores) as pool:
-        #Pass the elements of array into function
-
-        futures = [pool.submit(function, a) for a in array]
-        kwargs = {
-            'total': len(futures),
-            'unit': 'it',
-            'unit_scale': True,
-            'leave': True
-        }
-        #Print out the progress as tasks complete
-        for f in tqdm(concurrent.futures.as_completed(futures), **kwargs, desc = desc):
-            pass
-    out = []
-    #Get the results from the futures. 
-    for future in futures:
-        try:
-            out.append(future.result())
-        except Exception as e:
-            out.append(e)
-    return out
-
-def save_file(data, filename):
-    
-    if os.path.exists(filename):
-        raise Exception(f"SLG [E]: {filename} already exist [TODO: implement overwrite]")
-
-    fn_dir = os.path.dirname(filename)
-    fn_extension = os.path.splitext(filename)[-1]
-
-    if not os.path.isdir(fn_dir):
-        os.makedirs(fn_dir)
-
-    if fn_extension == ".json":
-        with open(filename, 'w',encoding='utf-8') as json_file:
-            json.dump(data, json_file,indent=4, ensure_ascii=False)
-
-    else:
-        raise Exception(f"SLG [E]: File extension {fn_extension} not recognised")
-
-
 
 def load_file(filename):
     
@@ -155,90 +143,6 @@ def load_file(filename):
         raise Exception(f"SLG [E]: File extension {fn_extension} not recognised")
 
     return data
-
-def dict2csv(input: dict, filename: str, path: str):
-    if not os.path.isdir(path):
-        os.makedirs(path)
-    with open(f"{path}{filename}.csv", "w") as nf:
-        for key in input.keys():
-            nf.write(f"{key},{input[key]}\n")
-
-def dict2json(input: dict, filename: str, path: str):
-    if not os.path.isdir(path):
-        os.makedirs(path)
-    with open(f"{path}/{filename}.json", 'w',encoding='utf-8') as json_file:
-        json.dump(input, json_file,indent=4, ensure_ascii=False)
-
-
-
-
-def json2dict(filename, path):
-    with open(f"{path}/{filename}.json") as json_file:
-        data = json.load(json_file)
-    return data
-
-def str2txt(input: str, filename: str, path: str):
-    if not os.path.isdir(path):
-        os.makedirs(path)
-    with open(f"{path}{filename}.txt", "w") as nf:
-        nf.write(input)
-
-def list2txt(input: list, filename: str = "text_list", path = None):
-    if not os.path.isdir(path):
-        os.makedirs(path)
-    with open(f"{path}/{filename}.txt", "w") as nf:
-        for element in input:
-            nf.write(element+"\n")
-            
-def txt2list(filename, path):
-    with open(f"{path}/{filename}.txt") as txt_file:
-        txt_list = [line.strip() for line in txt_file]
-    return txt_list
-
-def subsequences(sequence, n: int):
-    list_of_tuples = [tuple(sequence[i:i+n]) for i in range(len(sequence)-n+1)]
-    return list_of_tuples
-
-def powerset(iterable):
-    "powerset([1,2,3]) --> () (1,) (2,) (3,) (1,2) (1,3) (2,3) (1,2,3)"
-    s = list(iterable)
-    return itertools.chain.from_iterable(itertools.combinations(s, r) for r in range(len(s)+1))
-
-def list2csv(input: list, filename: str, directory: str):
-    if not os.path.isdir(directory):
-        os.makedirs(directory)
-    with open(f"/{directory}{filename}.csv", "w", newline="") as nf:
-        wr = csv.writer(nf, quoting=csv.QUOTE_ALL)
-        wr.writerows(input)
-
-def csv2list(file: str, directory: str, n_start=None, n_end=None):
-    if not os.path.isdir(directory):
-        os.makedirs(directory)
-    with open(f"{directory}{file}.csv", "r") as f:
-        csv_reader = csv.reader(f)
-        my_list = [
-            (line[0], ast.literal_eval(line[1]), ast.literal_eval(line[2]))
-            for line in take(n_end, csv_reader)
-        ]
-    return my_list[n_start:n_end]
-
-# TODO: Really needed here?
-def if_none_disable(x):
-    if x == None:
-        x = "disable"
-    return x
-
-
-def take(n, iterable):
-    """Return first n items of the iterable as a list"""
-    return list(itertools.islice(iterable, n))
-
-def marginalize(joint_dist:dict,side="left"):
-    # print(f"Marginalizing to the {side}")
-    marginal = Counter()
-    for (l,r),v in joint_dist.items():
-        marginal[r if side == "right" else l] += v
-    return dict(marginal.most_common())
 
 def normalize_dict(dictionnary: dict, norm_factor = None):
     if norm_factor == None:
@@ -403,130 +307,3 @@ def build_pmi_matrix(
     print(f"PMI Matrix built in {round(finish-start,2)} secs.")
     print("Done\n")
     return pmi_matrix
-
-
-
-def parallel_processes(processes:list):
-    """
-    Warning: this produces global variables "parallel_process_n" which are deleted at the end of the computation.
-    """
-    st = time.perf_counter()
-    np = len(processes)
-    print(f"Computing {np} processes in parallel...")
-    executor = concurrent.futures.ProcessPoolExecutor(max_workers=np)
-    for n, process in zip(range(np),processes):
-        variable_name = f"parallel_process_{n}"
-        globals()[variable_name] = executor.submit(*process)
-    for n in range(np):
-        variable_name = f"parallel_process_{n}"
-        globals()[variable_name] = eval(variable_name).result()
-    fin = time.perf_counter()
-    print(f"{np} processes computed in {round(fin-st,2)} secs.\n")
-    result = [eval(f"parallel_process_{n}") for n in range(np)]
-    for n in range(np):
-        del globals()[f"parallel_process_{n}"]
-    return result
-
-def flatten(list_of_lists):
-    return [item for sublist in list_of_lists for item in sublist]
-
-def delete_duplicates(x):
-    return list(dict.fromkeys(x))
-
-def clear_df(df):
-    mask = df.applymap(lambda x: x is None)
-    cols = df.columns[(mask).any()]
-    for col in df[cols]:
-        df.loc[mask[col], col] = ''
-    return df
-
-def df(list_of_list, keys = None):
-    raw_df = pd.DataFrame(list_of_list,index=keys)
-    return clear_df(raw_df.T)
-
-# Draft functions
-
-# def csv2list_raw(file: str, directory: str, n_start=None, n_end=None):
-#     if not os.path.isdir(directory):
-#         os.makedirs(directory)
-#     with open(f"{directory}{file}.csv", "r") as f:
-#         csv_reader = csv.reader(f)
-#         my_list = [
-#             [ast.literal_eval(item) for item in line]
-#             for line in take(n_end, csv_reader)
-#         ]
-#     return my_list[n_start:n_end]
-
-def csv2list_raw(file: str, directory: str, n_start=None, n_end=None,progress=False):
-    if not os.path.isdir(directory):
-        os.makedirs(directory)
-    with open(f"{directory}{file}.csv", "r") as f:
-        csv_reader = csv.reader(f)
-        my_list = []
-        if progress:
-            csv_reader_it = tqdm(take(n_end, csv_reader),desc = f"Loading: {file}")
-        else:
-            csv_reader_it = take(n_end, csv_reader)
-        for line in csv_reader_it:
-            list_line = [ast.literal_eval(item) for item in line]
-            my_list.append(list_line)
-    return my_list[n_start:n_end]
-
-def plot_scatter_line(
-    x,
-    y,
-    trace_name = None,
-    title=None,
-    xaxis_title=None,
-    yaxis_title=None,
-    line_shape='spline',
-    add_trace = None
-    ):
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(x=x, y=y, name = trace_name, line_shape=line_shape, mode='lines+markers'))
-    
-    if add_trace != None:
-        if isinstance(add_trace,tuple):
-            add_trace = [add_trace]
-        for trace in add_trace:
-            fig.add_trace(go.Scatter(x=trace[0], y=trace[1], name = trace[2], line_shape=line_shape, mode='lines+markers')) # TODO: rewrite with **kwargs
-
-
-    fig.update_layout(
-        title=title,
-        xaxis_title=xaxis_title,
-        yaxis_title=xaxis_title,
-        
-        )
-    return fig
-
-def scatter_plot(data:list,labels=None,legends=None,size=(15,10)):
-    fig, ax = plt.subplots(figsize=size)  # Create a figure and an axes.
-    for dataset in data:
-        ax.scatter(range(len(dataset)) if labels==None else labels,dataset,label="Data")
-    ax.set_xlabel('x')  # Add an x-label to the axes.
-    ax.set_ylabel('f(x)')  # Add a y-label to the axes.
-    ax.set_title("Title")  # Add a title to the axes.
-    ax.legend(range(1,len(data)+1) if legends==None else legends)  # Add a legend.
-    return ax
-
-profiler = """
-from pyinstrument import Profiler
-import sys
-def profiler(process):
-    profile = Profiler()
-
-    profile.start()
-    
-    try:
-        exec(process)
-    except:
-        print(f"{sys.exc_info()}")
-
-    profile.stop()
-
-    return print(profile.output_text(unicode=True, color=True))"""
-
-
-# value and index of max of matrix, in case needed
-# np.array(np.unravel_index(np.argsort(voc_matrix.toarray().flatten(), axis=0)[-10:], voc_matrix.shape)).T[::-1]
